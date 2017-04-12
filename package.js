@@ -8,7 +8,7 @@ Package.describe({
 Package.on_use(function (api) {
   api.versionsFrom('METEOR@1.0');
 
-  api.use('underscore', 'client');
+  api.use('underscore', 'client', 'reactive-var');
 
   api.export('PersistentMinimongo2', 'client');
 

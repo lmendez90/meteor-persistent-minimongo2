@@ -1,31 +1,31 @@
 /**
-Packages
+ Packages
 
-@module Packages
-*/
-
-/**
-The PersistentMinimongo2 package
-
-@class PersistentMinimongo2
-@constructor
-*/
-
-
+ @module Packages
+ */
 
 /**
-If the localstorage goes over 4.8 MB, trim the collections.
+ The PersistentMinimongo2 package
 
-@property capLocalStorageSize
-*/
+ @class PersistentMinimongo2
+ @constructor
+ */
+
+
+
+/**
+ If the localstorage goes over 4.8 MB, trim the collections.
+
+ @property capLocalStorageSize
+ */
 var capLocalStorageSize = 4.8;
 
 /**
-If the localstorage goes over `capLocalStorageSize`, trim the current collection,
-which wanted to add a new entry, by 50 entries.
+ If the localstorage goes over `capLocalStorageSize`, trim the current collection,
+ which wanted to add a new entry, by 50 entries.
 
-@property trimCollectionBy
-*/
+ @property trimCollectionBy
+ */
 var trimCollectionBy = 50;
 
 
@@ -33,7 +33,7 @@ var trimCollectionBy = 50;
 PersistentMinimongo2 = function (collection, dbname) {
     var self = this;
     if (! (self instanceof PersistentMinimongo2))
-            throw new Error('use "new" to construct a PersistentMinimongo2');
+        throw new Error('use "new" to construct a PersistentMinimongo2');
 
     self.key = 'minimongo__' + collection._name;
     self.col = collection;
@@ -52,68 +52,86 @@ PersistentMinimongo2 = function (collection, dbname) {
     });
 
     // load from storage
-    self.refresh(true);
-
-    self.col.find({}).observe({
-        added: function (doc) {
-
-            // Check if the localstorage is to big and reduce the current collection by 50 items
-            if(self.store.driver() === 'localStorageWrapper')
-                self.capCollection();
+    self.ready = new ReactiveVar(false);
+    self.subscriptionReady = new ReactiveVar(false);
+    self.init = true;
 
 
-            // add document id to tracking list and store
-            if (!_.contains(self.list, doc._id)) {
-                self.list.push(doc._id);
+    self.run = function(subscriptionReady) {
+        self.ready.set(true);
+        self.subscriptionReady.set(!! subscriptionReady);
+        self.refresh(self.init);
+    };
 
-                // store copy of document into db, if not already there
-                var key = self._makeDataKey(doc._id);
-                self.store.setItem(key, doc, function(err, value) {
+    self.setObserve = function(){
+        self.col.find({}).observe({
+            added: function (doc) {
+                if(Meteor.status().connected && !self.subscriptionReady.get()) {
+                    return;
+                }
+                // Check if the localstorage is to big and reduce the current collection by 50 items
+                if(self.store.driver() === 'localStorageWrapper')
+                    self.capCollection();
+
+                // add document id to tracking list and store
+                if (!_.contains(self.list, doc._id)) {
+                    self.list.push(doc._id);
+
+                    // store copy of document into db, if not already there
+                    var key = self._makeDataKey(doc._id);
+                    self.store.setItem(key, doc, function(err, value) {
+                        if(!err) {
+                            ++self.stats.added;
+                        }
+                    });
+
+                    // update the list
+                    self.store.setItem(self.key, self.list, function(err, value) {});
+                }
+            },
+
+            removed: function (doc) {
+                if(Meteor.status().connected && !self.subscriptionReady.get()) {
+                    return;
+                }
+                // if not in list, nothing to do
+                if(!_.contains(self.list, doc._id))
+                    return;
+
+
+                // remove document copy from local storage
+                self.store.removeItem(self._makeDataKey(doc._id), function(err) {
                     if(!err) {
-                        ++self.stats.added;
+                        ++self.stats.removed;
                     }
                 });
 
-                // update the list
-                self.store.setItem(self.key, self.list, function(err, value) {});
-            }
-        },
+                // remove from list
+                self.list = _.without(self.list, doc._id);
 
-        removed: function (doc) {
-            
-            // if not in list, nothing to do
-            if(!_.contains(self.list, doc._id))
-                return;
-
-
-            // remove document copy from local storage
-            self.store.removeItem(self._makeDataKey(doc._id), function(err) {
-                if(!err) {
-                    ++self.stats.removed;
+                // if tracking list is empty, delete; else store updated copy
+                if(self.list.length === 0) {
+                    self.store.removeItem(self.key, function(){});
+                } else {
+                    self.store.setItem(self.key, self.list, function(){});
                 }
-            });
 
-            // remove from list
-            self.list = _.without(self.list, doc._id);
+            },
 
-            // if tracking list is empty, delete; else store updated copy
-            if(self.list.length === 0) {
-                self.store.removeItem(self.key, function(){});
-            } else {
-                self.store.setItem(self.key, self.list, function(){});
-            }
-
-        },
-
-        changed: function (newDoc, oldDoc) {
-            // update document in local storage
-            self.store.setItem(self._makeDataKey(newDoc._id), newDoc, function(err, value) {
-                if(!err) {
-                    ++self.stats.changed;
+            changed: function (newDoc, oldDoc) {
+                // update document in local storage
+                if(Meteor.status().connected && !self.subscriptionReady.get()) {
+                    return;
                 }
-            });
-        }
-    });
+                self.store.setItem(self._makeDataKey(newDoc._id), newDoc, function(err, value) {
+                    if(!err) {
+                        ++self.stats.changed;
+                    }
+                });
+            }
+        });
+    }
+
 };
 
 PersistentMinimongo2.prototype = {
@@ -128,11 +146,11 @@ PersistentMinimongo2.prototype = {
         return this.key + '__' + id;
     },
     /**
-    Refresh the local storage
-    
-    @method refresh
-    @return {String}
-    */
+     Refresh the local storage
+
+     @method refresh
+     @return {String}
+     */
     refresh: function (init) {
         var self = this;
         self.store.getItem(self.key, function(err, list) {
@@ -140,7 +158,10 @@ PersistentMinimongo2.prototype = {
 
                 self.list = list || [];
                 self.stats.added = 0;
-
+                if(init) {
+                    self.setObserve();
+                    self.init = false;
+                }
                 if (!! list) {
                     var length = list.length;
                     var count = 0;
@@ -175,7 +196,7 @@ PersistentMinimongo2.prototype = {
 
                             // if not initializing, check for deletes
                             if(! init) {
-                            
+
                                 self.col.find({}).forEach(function (doc) {
                                     if(! _.contains(self.list, doc._id))
                                         self.col.remove({ _id: doc._id });
@@ -195,15 +216,16 @@ PersistentMinimongo2.prototype = {
                     }, 1);
 
                 }
+
             }
         });
     },
     /**
-    Gets the current localstorage size in MB
-    
-    @method localStorageSize
-    @return {String} total localstorage size in MB
-    */
+     Gets the current localstorage size in MB
+
+     @method localStorageSize
+     @return {String} total localstorage size in MB
+     */
     localStorageSize: function() {
 
         // function toSizeMB(info) {
@@ -224,16 +246,15 @@ PersistentMinimongo2.prototype = {
         return size;
     },
     /**
-    Check if the localstorage is to big and reduce the current collection by 50 items
-    
-    @method localStorageSize
-    @return {String}
-    */
+     Check if the localstorage is to big and reduce the current collection by 50 items
+
+     @method localStorageSize
+     @return {String}
+     */
     capCollection: function(){
         var _this = this;
 
         if(_this.localStorageSize() > capLocalStorageSize) {
-            console.log(_this.localStorageSize(), _this.col.find({}).count());
             // find the first 50 entries and remove them
             _.each(_this.col.find({}, {limit: trimCollectionBy}).fetch(), function(item){
                 _this.col.remove(item._id);
@@ -244,16 +265,3 @@ PersistentMinimongo2.prototype = {
 
 var persisters = [];
 var lpTimer = null;
-
-// React on manual local storage changes
-// Meteor.startup(function () {
-//     $(window).bind('storage', function (e) {
-//         console.log('STORAGE');
-//         Meteor.clearTimeout(lpTimer);
-//         lpTimer = Meteor.setTimeout(function () {
-//             _.each(persisters, function (lp) {
-//                 lp.refresh(false);
-//             });
-//         }, 250);
-//     });
-// });
